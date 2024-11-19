@@ -67,6 +67,9 @@ outputs:
         - path-helpers
         - scons
         - ntfsutils # [win]
+        - m2w64-toolchain # [win]
+        - patch  # [unix]
+        - dropbot::protoc  # [win]
         - platformio-helpers
     test:
       imports:
