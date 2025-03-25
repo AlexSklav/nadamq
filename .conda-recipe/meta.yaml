@@ -14,6 +14,7 @@ build:
   # If this is a new build for the same version, increment the build
   # number. If you do not include this key, it defaults to 0.
   number: 0
+  noarch: python
   script:
     # Create Cpp files and copy Arduino library files to Conda Arduino library.
     - python file_handler.py {{ SRC_DIR }} {{ PREFIX }} {{ PKG_NAME }} {{ MODULE_NAME }} {{ LIB_NAME }}
@@ -28,14 +29,9 @@ requirements:
     - python {{ python }}
     - ragel # [win]
     - ntfsutils # [win]
-    - libpython # [win]
-    - m2w64-toolchain # [win]
-    - msinttypes  # [win and py2k]
     - versioneer
     - pint
     - numpy
-    - cmake
-    - cython
     - pyserial
     - or-event
     - path-helpers
@@ -67,9 +63,6 @@ outputs:
         - path-helpers
         - scons
         - ntfsutils # [win]
-        - m2w64-toolchain # [win]
-        - patch  # [unix]
-        - dropbot::protoc  # [win]
         - platformio-helpers
     test:
       imports:
