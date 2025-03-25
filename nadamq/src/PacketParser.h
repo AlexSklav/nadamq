@@ -89,7 +89,7 @@ public:
      *  - `0`: No error, but packet was not completed in this pass.
      *  - `1`: Packet parsing was completed successfully in this pass.
      *  - `-1`: Parse error was encountered in this pass. */
-//    uint16_t &crc = crc_; // warning: unused variable 'crc'
+    uint16_t &crc = crc_;
 
     if (stream.available() > 0) {
       /* Read next available byte from stream. */
