@@ -63,8 +63,10 @@ def crc_init() -> int:
 
 def crc_reflect(data: int, data_len: int) -> int:
     """Reflect all bits of a data word of data_len bits."""
+    if data_len <= 0:
+        return 0
     ret = data & 0x01
-    for i in range(1, data_len):
+    for _ in range(1, data_len):
         data >>= 1
         ret = (ret << 1) | (data & 0x01)
     return ret
@@ -74,7 +76,7 @@ def crc_update(crc: int, data: Union[bytes, bytearray, np.ndarray]) -> int:
     """Update CRC with a sequence of bytes."""
     for byte in data:
         c = byte
-        for i in range(8):  # Process each bit
+        for _ in range(8):  # Process each bit
             bit = bool(crc & 0x8000)
             if c & 0x01:
                 bit = not bit
@@ -133,10 +135,18 @@ class FixedPacket:
             self.set_data(data)
 
     @property
-    def max_buffer_size(self):
+    def max_buffer_size(self) -> int:
         return (1 << 16) - 1
 
-    def set_data(self, data: Union[bytes, bytearray]):
+    @property
+    def crc(self) -> int:
+        return self.crc_
+
+    @property
+    def buffer_size(self) -> int:
+        return self.buffer_size_
+
+    def set_data(self, data: Union[bytes, bytearray]) -> None:
         if len(data) > self.buffer_size_:
             raise ValueError(f'Data length is too large for buffer, {len(data)} > {self.buffer_size_}')
         
@@ -147,8 +157,7 @@ class FixedPacket:
     def data(self) -> bytes:
         if self.payload_length_ > 0:
             return bytes(self.payload_buffer_[:self.payload_length_])
-        else:
-            return b''
+        return b''
 
     def data_ptr(self) -> int:
         """Return the pointer to the payload buffer."""
@@ -156,7 +165,7 @@ class FixedPacket:
             return 0
         return id(self.payload_buffer_)
 
-    def compute_crc(self):
+    def compute_crc(self) -> None:
         """Compute CRC-16 for payload data only."""
         self.crc_ = compute_crc16(self.data())
 
@@ -184,40 +193,36 @@ class FixedPacket:
             return b''
 
     @property
-    def type_(self):
+    def type_(self) -> int:
         return self._type
 
     @type_.setter
-    def type_(self, value):
+    def type_(self, value: int) -> None:
         self._type = value
 
     @property
-    def iuid(self):
+    def iuid(self) -> int:
         return self.iuid_
 
     @iuid.setter
-    def iuid(self, value):
+    def iuid(self, value: int) -> None:
         self.iuid_ = value
 
-    @property
-    def buffer_size(self):
-        return self.buffer_size_
-
-    def clear_buffer(self):
+    def clear_buffer(self) -> None:
         """Deallocate buffer if it has been allocated."""
         self.payload_buffer_ = None
         self.buffer_ = None
         self.buffer_size_ = 0
         self.payload_length_ = 0
 
-    def realloc_buffer(self, buffer_size: int):
+    def realloc_buffer(self, buffer_size: int) -> None:
         """Allocate the specified buffer size, deallocating the existing buffer."""
         if buffer_size > self.max_buffer_size:
             raise RuntimeError(f'Max buffer size is {self.max_buffer_size}')
         self.clear_buffer()
         self.alloc_buffer(buffer_size)
 
-    def alloc_buffer(self, buffer_size: int):
+    def alloc_buffer(self, buffer_size: int) -> None:
         """Allocate the specified buffer size."""
         if self.buffer_ is not None:
             raise RuntimeError('Buffer has already been allocated.')
@@ -227,7 +232,7 @@ class FixedPacket:
         self.set_buffer(self.buffer_, overwrite=True)
         self.buffer_size_ = buffer_size
 
-    def set_buffer(self, data: Union[bytes, bytearray, np.ndarray], overwrite=False):
+    def set_buffer(self, data: Union[bytes, bytearray, np.ndarray], overwrite: bool = False) -> None:
         """Assign the specified data buffer as the payload buffer of the packet."""
         if self.payload_buffer_ is not None and not overwrite:
             raise RuntimeError('Packet already has a payload buffer allocated. Must use `overwrite=True` to set buffer anyway.')
@@ -235,20 +240,20 @@ class FixedPacket:
         self.buffer_size_ = len(data)
         self.payload_length_ = 0
 
-    def __str__(self):
+    def __str__(self) -> str:
         try:
             return (f"FixedPacket(type={PACKET_NAME_BY_TYPE.get(self._type, 'UNKNOWN')}, "
                     f"iuid={self.iuid_}, length={self.payload_length_}, "
                     f"data={self.data() if self.payload_length_ > 0 else b''})")
-        except Exception:
-            return "FixedPacket(ERROR)"
+        except Exception as e:
+            return f"FixedPacket(ERROR: {str(e)})"
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return self.__str__()
 
 
 class cPacketParser:
-    def __init__(self, buffer_size=8 << 10):
+    def __init__(self, buffer_size: int = 8 << 10):
         self.payload_bytes_received_ = 0
         self.payload_bytes_expected_ = 0
         self.message_completed_ = False
@@ -260,7 +265,7 @@ class cPacketParser:
         self.header_size = 5  # IUID(2) + TYPE(1) + LENGTH(2)
         self.reset()
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset parser state and packet."""
         self.state = 'START'
         self.buffer = bytearray()
@@ -291,7 +296,7 @@ class cPacketParser:
                 self.packet = FixedPacket(buffer_size=self.packet.buffer_size, incoming=True)
         return False
 
-    def parse_byte(self, byte: int):
+    def parse_byte(self, byte: int) -> None:
         """Parse a single byte."""
         try:
             self.buffer.append(byte)
@@ -370,15 +375,15 @@ class cPacketParser:
             return
 
     @property
-    def message_completed(self):
+    def message_completed(self) -> bool:
         return self.message_completed_
 
     @property
-    def error(self):
+    def error(self) -> bool:
         return self.parse_error_
 
     @property
-    def crc(self):
+    def crc(self) -> int:
         return self.crc_
 
 
