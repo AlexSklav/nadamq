@@ -253,6 +253,19 @@ class FixedPacket:
 
 
 class cPacketParser:
+    """Parser for fixed-size packets with CRC validation.
+    
+    The parser implements a state machine to process incoming bytes and construct
+    complete packets. The packet format is:
+    START(3) + IUID(2) + TYPE(1) + [LENGTH(2) + PAYLOAD(n) + CRC(2)]
+    
+    Attributes:
+        payload_bytes_received_: Number of payload bytes received
+        payload_bytes_expected_: Expected payload length
+        message_completed_: True if a complete message has been parsed
+        parse_error_: True if an error occurred during parsing
+        state: Current state of the parser ('START', 'HEADER', etc.)
+    """
     def __init__(self, buffer_size: int = 8 << 10):
         self.payload_bytes_received_ = 0
         self.payload_bytes_expected_ = 0
@@ -262,7 +275,6 @@ class cPacketParser:
         self.packet = FixedPacket(buffer_size=buffer_size)
         self.state = 'START'
         self.buffer = bytearray()
-        self.header_size = 5  # IUID(2) + TYPE(1) + LENGTH(2)
         self.reset()
 
     def reset(self) -> None:
@@ -385,7 +397,19 @@ class cPacketParser:
 
 
 def parse_from_string(packet_str: Union[str, bytes]) -> Optional[FixedPacket]:
-    """Parse a packet from a string or bytes object."""
+    """Parse a packet from a string or bytes object.
+    
+    Args:
+        packet_str: Input string or bytes to parse
+        
+    Returns:
+        FixedPacket if parsing successful, None otherwise
+        
+    Raises:
+        TypeError: If input is neither string nor bytes
+    """
+    if not isinstance(packet_str, (str, bytes)):
+        raise TypeError("Input must be string or bytes")
     if isinstance(packet_str, str):
         packet_str = packet_str.encode('utf-8')
     parser = cPacketParser()
@@ -650,9 +674,9 @@ class PacketStream:
 class PacketSocket:
     """Base class for packet socket implementation."""
     
-    def __init__(self):
-        self.idle_state = -1
-        self.cs = 0
+    def __init__(self) -> None:
+        self.idle_state: int = -1
+        self.cs: int = 0
     
     def idle(self) -> bool:
         """Return True if socket is idle."""
@@ -662,7 +686,7 @@ class PacketSocket:
         """Return current state."""
         return self.cs
     
-    def set_state(self, value: int):
+    def set_state(self, value: int) -> None:
         """Set current state."""
         self.cs = value
     
