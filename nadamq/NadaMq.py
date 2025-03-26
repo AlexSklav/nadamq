@@ -107,12 +107,11 @@ def compute_crc16(data: Union[bytes, bytearray]) -> int:
 
 class FixedPacket:
     def __init__(self, type_=PACKET_TYPE.NONE, iuid=0, data=None,
-                 buffer_=None, buffer_size=None, incoming=False):
+                 buffer_=None, buffer_size=None):
         self.iuid_ = iuid
         self._type = type_
-        self.incoming_ = incoming
         self.payload_length_ = 0
-        self.buffer_size_ = 0
+        self.buffer_size_ = 6
         self.payload_buffer_ = None
         self.crc_ = 0
         self.buffer_ = None
@@ -126,7 +125,7 @@ class FixedPacket:
                 else:
                     self.set_buffer(buffer_)
             elif buffer_size is None:
-                buffer_size = max(len(data), 1)
+                buffer_size = 6 + max(len(data), 1) + 4  # Add 2 bytes for CRC and 2 bytes for length
 
         if buffer_size is not None and buffer_size > 0:
             self.alloc_buffer(buffer_size)
@@ -178,7 +177,7 @@ class FixedPacket:
             header = struct.pack('>H', self.iuid_)  # IUID (2 bytes)
             header += struct.pack('B', self._type)  # Type (1 byte)
 
-            if (not self.incoming_) and self.payload_length_ == 0:
+            if self.buffer_size_ == 6:
                 packet = FLAGS.START + header
                 return packet
             else:
@@ -189,7 +188,8 @@ class FixedPacket:
                 packet += struct.pack('>H', self.crc_)
                 return packet
 
-        except Exception:
+        except Exception as e:
+            print(f"Error converting packet to string: {e}")
             return b''
 
     @property
@@ -212,7 +212,7 @@ class FixedPacket:
         """Deallocate buffer if it has been allocated."""
         self.payload_buffer_ = None
         self.buffer_ = None
-        self.buffer_size_ = 0
+        self.buffer_size_ = 6
         self.payload_length_ = 0
 
     def realloc_buffer(self, buffer_size: int) -> None:
@@ -237,7 +237,7 @@ class FixedPacket:
         if self.payload_buffer_ is not None and not overwrite:
             raise RuntimeError('Packet already has a payload buffer allocated. Must use `overwrite=True` to set buffer anyway.')
         self.payload_buffer_ = bytearray(data)
-        self.buffer_size_ = len(data)
+        self.buffer_size_ = len(data) + 4  # Add 2 bytes for CRC and 2 bytes for length
         self.payload_length_ = 0
 
     def __str__(self) -> str:
@@ -259,7 +259,7 @@ class cPacketParser:
         self.message_completed_ = False
         self.parse_error_ = False
         self.crc_ = 0
-        self.packet = FixedPacket(buffer_size=buffer_size, incoming=True)
+        self.packet = FixedPacket(buffer_size=buffer_size)
         self.state = 'START'
         self.buffer = bytearray()
         self.header_size = 5  # IUID(2) + TYPE(1) + LENGTH(2)
@@ -279,12 +279,13 @@ class cPacketParser:
 
     def parse(self, data: Union[bytes, bytearray, np.ndarray]) -> Union[FixedPacket, bool]:
         """Parse packet data and return packet if complete."""
-        for byte in data:
+        for i, byte in enumerate(data):
             self.parse_byte(byte)
-            if self.message_completed_:
+            if self.message_completed_ or (i == len(data)-1 == 5): # handle the case where the message is short START(3) + IUID(2) + TYPE(1)
+                self.packet.buffer_size_ = i+1
                 packet = self.packet
                 # Create a new packet for next message
-                self.packet = FixedPacket(buffer_size=self.packet.buffer_size, incoming=True)
+                self.packet = FixedPacket()
                 self.reset()
                 return packet
             elif self.parse_error_:
@@ -292,8 +293,6 @@ class cPacketParser:
                 # Reset state but continue processing
                 self.reset()
                 self.parse_error_ = False
-                # Create fresh packet
-                self.packet = FixedPacket(buffer_size=self.packet.buffer_size, incoming=True)
         return False
 
     def parse_byte(self, byte: int) -> None:
@@ -307,37 +306,34 @@ class cPacketParser:
                         self.state = 'HEADER'
                         self.buffer = bytearray()
 
-            elif self.state == 'HEADER':
-                if len(self.buffer) >= self.header_size:
-                    try:
-                        # Parse header
-                        self.packet.iuid_ = struct.unpack('>H', self.buffer[0:2])[0]
-                        self.packet.type_ = self.buffer[2]
-                        self.payload_bytes_expected_ = struct.unpack('>H', self.buffer[3:5])[0]
-                        
-                        # Validate header
-                        if self.packet.type_ not in PACKET_NAME_BY_TYPE:
-                            print(f"Invalid packet type: {hex(self.packet.type_)}")
-                            self.parse_error_ = True
-                            return
-                            
-                        if self.payload_bytes_expected_ > self.packet.max_buffer_size:
-                            print(f"Payload length too large: {self.payload_bytes_expected_} > {self.packet.max_buffer_size}")
-                            self.parse_error_ = True
-                            return
+            elif self.state == 'HEADER':  # IUID(2) + TYPE(1)
+                if len(self.buffer) >= 3:
+                    self.packet.iuid_ = struct.unpack('>H', self.buffer[0:2])[0]
+                    self.packet.type_ = self.buffer[2]
+                    self.state = 'LENGTH'
+                    self.buffer = bytearray()
 
-                        # Validate against expected packet length
-                        expected_total_length = 3 + self.header_size + self.payload_bytes_expected_ + 2  # START + HEADER + PAYLOAD + CRC
+                    # Validate header
+                    if self.packet.type_ not in PACKET_NAME_BY_TYPE:
+                        print(f"Invalid packet type: {hex(self.packet.type_)}")
+                        self.parse_error_ = True
+                        return
 
-                        if self.payload_bytes_expected_ > 0:
-                            self.packet.alloc_buffer(self.payload_bytes_expected_)
-                            self.state = 'PAYLOAD'
-                        else:
-                            self.packet.payload_length_ = 0
-                            self.state = 'CRC'
-                        self.buffer = bytearray()
-                    except (struct.error, ValueError) as e:
-                        print(f"Error parsing header: {e}")
+            elif self.state == 'LENGTH':
+                if len(self.buffer) >= 2:  # LENGTH(2)
+                    self.payload_bytes_expected_ = struct.unpack('>H', self.buffer[0:2])[0]
+
+                    if self.payload_bytes_expected_ > 0:
+                        self.packet.alloc_buffer(self.payload_bytes_expected_)
+                        self.state = 'PAYLOAD'
+                    else:
+                        self.packet.payload_length_ = 0
+                        self.state = 'CRC'
+                    self.buffer = bytearray()
+
+                    # Validate payload length
+                    if self.payload_bytes_expected_ > self.packet.max_buffer_size:
+                        print(f"Payload length too large: {self.payload_bytes_expected_} > {self.packet.max_buffer_size}")
                         self.parse_error_ = True
                         return
 
@@ -368,6 +364,7 @@ class cPacketParser:
                         print(f"Error parsing CRC: {e}")
                         self.parse_error_ = True
                         return
+
         except Exception as e:
             print(f"Unexpected error while parsing: {e}")
             # Catch any other errors and continue processing
