@@ -1,13 +1,22 @@
 include setup.py
 recursive-include nadamq src/packet_actions.cpp
+recursive-include nadamq src/crc_common.cpp
+recursive-include nadamq src/crc-16.cpp
 recursive-include nadamq lib/*
-recursive-include nadamq *.pyx
-recursive-include nadamq *.pxd
 recursive-include nadamq *.h
 recursive-include nadamq *.c
-recursive-exclude nadamq *.pyc
+recursive-exclude *.pyc
+recursive-exclude *.pyo
+recursive-exclude *.pyd
 recursive-exclude nadamq *~
 exclude .DS_Store
 recursive-exclude nadamq .DS_Store
+recursive-exclude **/__pycache__
+recursive-exclude nadamq **/__pycache__
+recursive-exclude */__pycache__
+recursive-exclude nadamq */__pycache__
+exclude __pycache__
+exclude nadamq/__pycache__
 include versioneer.py
 include nadamq/_version.py
+exclude nadamq/src/dump_events_header.py
