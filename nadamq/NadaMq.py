@@ -1,9 +1,11 @@
 import struct
-import enum
-from typing import Optional, Union, TypeVar, Generic, List
+from typing import Optional, Union, TypeVar, Generic, List, Dict, Set
 from collections import deque
 import numpy as np
 from io import BytesIO
+from logging_helpers import _L
+from enum import Enum, auto
+from dataclasses import dataclass
 
 
 class PacketType:
@@ -45,7 +47,7 @@ class _PacketTypes:
 PACKET_TYPES = _PacketTypes()
 FLAGS = _Flags()
 
-PACKET_NAME_BY_TYPE = {
+PACKET_NAME_BY_TYPE: Dict[int, str] = {
     PACKET_TYPE.NONE: 'NONE',
     PACKET_TYPE.ACK: 'ACK',
     PACKET_TYPE.NACK: 'NACK',
@@ -251,6 +253,22 @@ class FixedPacket:
     def __repr__(self) -> str:
         return self.__str__()
 
+    @property
+    def is_valid(self) -> bool:
+        """Check if packet is in a valid state."""
+        return (self.type_ in PACKET_NAME_BY_TYPE and
+                self.payload_length_ <= self.max_buffer_size and
+                (self.payload_length_ == 0 or self.payload_buffer_ is not None))
+
+
+class PacketState(Enum):
+    """States for packet parsing."""
+    START = auto()
+    HEADER = auto()
+    LENGTH = auto()
+    PAYLOAD = auto()
+    CRC = auto()
+
 
 class cPacketParser:
     """Parser for fixed-size packets with CRC validation.
@@ -273,13 +291,13 @@ class cPacketParser:
         self.parse_error_ = False
         self.crc_ = 0
         self.packet = FixedPacket(buffer_size=buffer_size)
-        self.state = 'START'
+        self.state = PacketState.START
         self.buffer = bytearray()
         self.reset()
 
     def reset(self) -> None:
         """Reset parser state and packet."""
-        self.state = 'START'
+        self.state = PacketState.START
         self.buffer = bytearray()
         self.message_completed_ = False
         self.parse_error_ = False
@@ -312,35 +330,35 @@ class cPacketParser:
         try:
             self.buffer.append(byte)
             
-            if self.state == 'START':
+            if self.state == PacketState.START:
                 if len(self.buffer) >= 3:
                     if bytes(self.buffer[-3:]) == FLAGS.START:
-                        self.state = 'HEADER'
+                        self.state = PacketState.HEADER
                         self.buffer = bytearray()
 
-            elif self.state == 'HEADER':  # IUID(2) + TYPE(1)
+            elif self.state == PacketState.HEADER:  # IUID(2) + TYPE(1)
                 if len(self.buffer) >= 3:
                     self.packet.iuid_ = struct.unpack('>H', self.buffer[0:2])[0]
                     self.packet.type_ = self.buffer[2]
-                    self.state = 'LENGTH'
+                    self.state = PacketState.LENGTH
                     self.buffer = bytearray()
 
                     # Validate header
                     if self.packet.type_ not in PACKET_NAME_BY_TYPE:
-                        print(f"Invalid packet type: {hex(self.packet.type_)}")
+                        _L().error(f"Invalid packet type: {hex(self.packet.type_)}")
                         self.parse_error_ = True
                         return
 
-            elif self.state == 'LENGTH':
+            elif self.state == PacketState.LENGTH:
                 if len(self.buffer) >= 2:  # LENGTH(2)
                     self.payload_bytes_expected_ = struct.unpack('>H', self.buffer[0:2])[0]
 
                     if self.payload_bytes_expected_ > 0:
                         self.packet.alloc_buffer(self.payload_bytes_expected_)
-                        self.state = 'PAYLOAD'
+                        self.state = PacketState.PAYLOAD
                     else:
                         self.packet.payload_length_ = 0
-                        self.state = 'CRC'
+                        self.state = PacketState.CRC
                     self.buffer = bytearray()
 
                     # Validate payload length
@@ -349,19 +367,19 @@ class cPacketParser:
                         self.parse_error_ = True
                         return
 
-            elif self.state == 'PAYLOAD':
+            elif self.state == PacketState.PAYLOAD:
                 if len(self.buffer) >= self.payload_bytes_expected_:
                     try:
                         payload_data = self.buffer[:self.payload_bytes_expected_]
                         self.packet.set_data(payload_data)
-                        self.state = 'CRC'
+                        self.state = PacketState.CRC
                         self.buffer = bytearray()
                     except ValueError as e:
                         print(f"Error setting payload: {e}")
                         self.parse_error_ = True
                         return
 
-            elif self.state == 'CRC':
+            elif self.state == PacketState.CRC:
                 if len(self.buffer) >= 2:
                     try:
                         received_crc = struct.unpack('>H', bytes(self.buffer[:2]))[0]
@@ -378,8 +396,7 @@ class cPacketParser:
                         return
 
         except Exception as e:
-            print(f"Unexpected error while parsing: {e}")
-            # Catch any other errors and continue processing
+            _L().exception(f"Unexpected error while parsing: {e}")
             self.parse_error_ = True
             return
 
@@ -670,6 +687,16 @@ class PacketStream:
         
         return value
 
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Clean up resources."""
+        while not self.packet_queue.empty():
+            self.allocator.free_packet_buffer(self.packet_queue.pop_tail())
+        self.data = None
+        self.bytes_available = 0
+
 
 class PacketSocket:
     """Base class for packet socket implementation."""
@@ -699,17 +726,27 @@ class PacketSocket:
         pass
 
 
+@dataclass
+class PacketConfig:
+    """Configuration for packet handling."""
+    buffer_size: int = 128
+    max_queue_length: int = 1024
+    event_queue_length: int = 256
+    rx_queue_length: int = 64
+    tx_queue_length: int = 64
+
+
 class StreamPacketSocket(PacketSocket):
     """Socket for streaming packets."""
     
     def __init__(self, parser: cPacketParser, allocator: PacketAllocator,
-                 event_queue_length: int, rx_queue_length: int, tx_queue_length: int):
+                 config: PacketConfig = PacketConfig()):
         super().__init__()
         self.parser = parser
         self.allocator = allocator
-        self.rx_queue = BoundedDeque[FixedPacket](rx_queue_length)
-        self.tx_queue = BoundedDeque[FixedPacket](tx_queue_length)
-        self.event_queue = CircularBuffer(event_queue_length)
+        self.rx_queue = BoundedDeque[FixedPacket](config.rx_queue_length)
+        self.tx_queue = BoundedDeque[FixedPacket](config.tx_queue_length)
+        self.event_queue = CircularBuffer(config.event_queue_length)
         self.parser_packet = allocator.create_packet()
         self.rx_packet = None
         self.tx_packet = None
@@ -775,8 +812,24 @@ class CommandPacketHandler:
         self.output_stream = output_stream
         self.command_processor = command_processor
     
+    def _validate_packet(self, packet: FixedPacket) -> bool:
+        """Validate packet before processing."""
+        if packet is None:
+            _L().error("Received null packet")
+            return False
+        if packet.type_ not in PACKET_NAME_BY_TYPE:
+            _L().error(f"Invalid packet type: {packet.type_}")
+            return False
+        if packet.payload_length_ > packet.max_buffer_size:
+            _L().error(f"Payload too large: {packet.payload_length_}")
+            return False
+        return True
+
     def process_packet(self, packet: FixedPacket):
         """Process packet containing command."""
+        if not self._validate_packet(packet):
+            return
+        
         if packet.type_ == PACKET_TYPE.DATA and packet.payload_length_ > 0:
             response = self.command_processor.process_command(
                 packet.payload_buffer_[:packet.payload_length_],
