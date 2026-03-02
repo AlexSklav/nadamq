@@ -27,6 +27,7 @@ build:
 requirements:
   build:
     - python {{ python }}
+    - setuptools
     - ragel # [win]
     - ntfsutils # [win]
     - versioneer
@@ -65,6 +66,8 @@ outputs:
         - ntfsutils # [win]
         - platformio-helpers
     test:
+      requires:
+        - pytest
       imports:
         - {{ MODULE_NAME }}
         - {{ MODULE_NAME }}.{{ LIB_NAME }}
