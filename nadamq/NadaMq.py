@@ -171,9 +171,6 @@ class FixedPacket:
         self.crc_ = compute_crc16(self.data())
 
     def tobytes(self) -> bytes:
-        return self.tostring()
-
-    def tostring(self) -> bytes:
         try:
             # Format: START + IUID + TYPE + [LENGTH + PAYLOAD + CRC if payload exists]
             header = struct.pack('>H', self.iuid_)  # IUID (2 bytes)
@@ -191,8 +188,14 @@ class FixedPacket:
                 return packet
 
         except Exception as e:
-            print(f"Error converting packet to string: {e}")
+            print(f"Error converting packet to bytes: {e}")
             return b''
+
+    def tostring(self) -> bytes:
+        import warnings
+        warnings.warn("tostring() is deprecated, use tobytes() instead",
+                      DeprecationWarning, stacklevel=2)
+        return self.tobytes()
 
     @property
     def type_(self) -> int:
@@ -435,7 +438,7 @@ def parse_from_string(packet_str: Union[str, bytes]) -> Optional[FixedPacket]:
 
 def byte_pair(value: int) -> tuple:
     """Split a 16-bit value into two bytes."""
-    return chr((value >> 8) & 0xFF), chr(value & 0xFF)
+    return (value >> 8) & 0xFF, value & 0xFF
 
 
 class FixedSizeBufferPool:

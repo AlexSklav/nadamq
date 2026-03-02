@@ -134,14 +134,14 @@ class CommandRequestManagerBase:
 
 class CommandRequestManagerDebug(CommandRequestManagerBase):
     def request(self, request_type_name: str, **kwargs: Any) -> bytes:
-        encoded_request = super(CommandRequestManagerDebug, self).request(request_type_name, **kwargs)
+        encoded_request = super().request(request_type_name, **kwargs)
         print(f'# `{request_type_name}Request` #')
         print('')
         print(' - Arguments:')
         for k, v in kwargs.items():
             print(f'  - `{k}`: `{v}`')
-        data = np.fromstring(encoded_request, dtype=np.uint8)
-        print(f' - Encoded: `{repr(data.tostring())}`')
+        data = np.frombuffer(encoded_request, dtype=np.uint8)
+        print(f' - Encoded: `{repr(data.tobytes())}`')
         print(f'            `{data}`')
         print('')
         return encoded_request
@@ -153,7 +153,7 @@ class CommandRequestManagerDebug(CommandRequestManagerBase):
         useful for determining the length of the encoded protocol buffer
         message, and/or debugging.
         """
-        sub_response = super(CommandRequestManagerDebug, self).response(byte_data)
+        sub_response = super().response(byte_data)
         return sub_response, byte_data
 
 
@@ -169,7 +169,7 @@ class CommandRequestManager(CommandRequestManagerBase):
         `MyCommandAResponse`)_ to give the caller a chance to manually retrieve
         the return value.
         """
-        sub_response = super(CommandRequestManager, self).response(byte_data)
+        sub_response = super().response(byte_data)
         return getattr(sub_response, 'result', sub_response)
 
 
@@ -278,19 +278,19 @@ class NodeProxy:
         # Flush any remaining bytes from stream.
         self._stream.read()
         # Write request packet to stream.
-        self._stream.write(packet.tostring())
+        self._stream.write(packet.tobytes())
         parser = cPacketParser()
-        data = np.array([ord(v) for v in self._stream.read()], dtype='uint8')
+        data = np.frombuffer(self._stream.read(), dtype='uint8')
         start = datetime.now()
         wait_counts = 0
         response_packet = None
         try:
             result = parser.parse(data)
             while not result:
-                data = np.array([ord(v) for v in self._stream.read()], dtype='uint8')
+                data = np.frombuffer(self._stream.read(), dtype='uint8')
                 result = parser.parse(data)
                 if (datetime.now() - start).total_seconds() > self._timeout:
-                    raise ValueError(f'Timeout while waiting for packet.\n"{pformat(data.tostring())}"')
+                    raise ValueError(f'Timeout while waiting for packet.\n"{pformat(data.tobytes())}"')
                 if not result:
                     time.sleep(0.0001)
                     wait_counts += 1
@@ -298,7 +298,7 @@ class NodeProxy:
                     response_packet = result
                     break
         except RuntimeError:
-            raise ValueError(f'Error parsing response packet.\n"{pformat(data.tostring())}"')
+            raise ValueError(f'Error parsing response packet.\n"{pformat(data.tobytes())}"')
         if response_packet.type_ == PACKET_TYPES.DATA:
             if command_name == 'ForwardI2cRequest':
                 # This was a forwarded request, so we must return the undecoded
@@ -368,7 +368,7 @@ class SerialStream:
         print(self.read())
 
     def available(self) -> int:
-        return self._serial.inWaiting()
+        return self._serial.in_waiting
 
     def read(self, count: int = None) -> bytes:
         if count is None:

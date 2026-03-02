@@ -134,7 +134,7 @@ def read_packet(read_func: Callable, timeout_s: Optional[float] = None, poll_s: 
             while True:
                 data = _read_func()
                 if data:
-                    result_ = parser.parse(np.fromstring(data, dtype='uint8'))
+                    result_ = parser.parse(np.frombuffer(data, dtype='uint8'))
                     if result_ is not False:
                         output['response'] = result_
                         packet_ready.set()
