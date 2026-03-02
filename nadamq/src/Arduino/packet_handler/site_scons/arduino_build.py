@@ -36,8 +36,6 @@
 #
 # $ scons EXTRA_LIB=<my-extra-library-dir>
 #
-from __future__ import absolute_import
-from __future__ import print_function
 from glob import glob
 import sys
 import re

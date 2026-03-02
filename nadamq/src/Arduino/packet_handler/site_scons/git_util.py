@@ -1,4 +1,3 @@
-from __future__ import absolute_import
 import os
 from subprocess import Popen, PIPE, check_call, CalledProcessError
 import re
@@ -55,8 +54,8 @@ class GitUtil:
 
     def command(self, x):
         try:
-            x.__iter__
-        except:
+            iter(x)
+        except TypeError:
             x = re.split(r'\s+', x)
         cwd = os.getcwd()
 
