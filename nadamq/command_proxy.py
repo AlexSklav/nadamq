@@ -1,6 +1,7 @@
 # coding: utf-8
 import re
 import time
+import logging
 import serial
 
 import numpy as np
@@ -10,6 +11,8 @@ from pprint import pformat
 from typing import Dict, Callable, List, Any, Tuple
 
 from nadamq.NadaMq import (cPacket, PACKET_TYPES, cPacketParser)
+
+logger = logging.getLogger(__name__)
 
 
 def camelcase_to_underscore(value: str) -> str:
@@ -244,10 +247,14 @@ class NodeProxy:
                 try:
                     return command_func(**kwargs)
                 except ValueError as exception:
-                    exception_str = str(exception)
-                    if not exception_str.startswith('Timeout'):
+                    if not str(exception).startswith('Timeout'):
+                        # Not a timeout, so retrying will not help.
                         raise
-                    raise exception
+                    if i >= retry_count - 1:
+                        # Final attempt timed out.
+                        raise
+                    logger.debug(f'Timeout on `{name}` request '
+                                 f'(attempt {i + 1}/{retry_count}); retrying.')
 
         return f
 
@@ -286,17 +293,19 @@ class NodeProxy:
         response_packet = None
         try:
             result = parser.parse(data)
-            while not result:
-                data = np.frombuffer(self._stream.read(), dtype='uint8')
-                result = parser.parse(data)
-                if (datetime.now() - start).total_seconds() > self._timeout:
-                    raise ValueError(f'Timeout while waiting for packet.\n"{pformat(data.tobytes())}"')
-                if not result:
-                    time.sleep(0.0001)
-                    wait_counts += 1
-                else:
+            while True:
+                if result is not False:
+                    # N.B. the packet may have been completed by *either* the
+                    # initial parse above or a parse inside this loop, so the
+                    # completed packet is captured here in both cases.
                     response_packet = result
                     break
+                if (datetime.now() - start).total_seconds() > self._timeout:
+                    raise ValueError(f'Timeout while waiting for packet.\n"{pformat(data.tobytes())}"')
+                time.sleep(0.0001)
+                wait_counts += 1
+                data = np.frombuffer(self._stream.read(), dtype='uint8')
+                result = parser.parse(data)
         except RuntimeError:
             raise ValueError(f'Error parsing response packet.\n"{pformat(data.tobytes())}"')
         if response_packet.type_ == PACKET_TYPES.DATA:
@@ -365,7 +374,9 @@ class SerialStream:
         self._serial = serial.Serial(*self._args, **self._kwargs)
         time.sleep(.05)
         # Flush welcome message.
-        print(self.read())
+        welcome_message = self.read()
+        if welcome_message:
+            logger.debug(f'Flushed welcome message: {welcome_message!r}')
 
     def available(self) -> int:
         return self._serial.in_waiting
@@ -445,9 +456,13 @@ class RemoteNodeProxy:
                 try:
                     return command_func(**kwargs)
                 except ValueError as exception:
-                    exception_str = str(exception)
-                    if not exception_str.startswith('Timeout'):
+                    if not str(exception).startswith('Timeout'):
+                        # Not a timeout, so retrying will not help.
                         raise
-                    raise exception
+                    if i >= retry_count - 1:
+                        # Final attempt timed out.
+                        raise
+                    logger.debug(f'Timeout on forwarded `{name}` request '
+                                 f'(attempt {i + 1}/{retry_count}); retrying.')
 
         return f
