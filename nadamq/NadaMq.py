@@ -57,6 +57,21 @@ PACKET_NAME_BY_TYPE: Dict[int, str] = {
     PACKET_TYPE.ID_RESPONSE: 'ID_RESPONSE'
 }
 
+#: Packet types that consist of a header *only* on the wire, i.e.::
+#:
+#:     START(3) + IUID(2) + TYPE(1)
+#:
+#: These packets carry **no** ``LENGTH``, ``PAYLOAD`` or ``CRC`` fields, so
+#: they are complete as soon as the type field has been read.  Every other
+#: packet type uses the full framing::
+#:
+#:     START(3) + IUID(2) + TYPE(1) + LENGTH(2) + PAYLOAD(n) + CRC(2)
+HEADER_ONLY_TYPES: Set[int] = frozenset({PACKET_TYPES.ACK, PACKET_TYPES.NACK,
+                                         PACKET_TYPES.ID_REQUEST})
+
+#: Number of bytes in a header-only packet (see :data:`HEADER_ONLY_TYPES`).
+HEADER_ONLY_PACKET_SIZE = 6
+
 
 def crc_init() -> int:
     """Initialize CRC-16 value."""
@@ -113,7 +128,10 @@ class FixedPacket:
         self.iuid_ = iuid
         self._type = type_
         self.payload_length_ = 0
-        self.buffer_size_ = 6
+        # `buffer_size_` is the *capacity of the payload buffer*, i.e. zero
+        # until a buffer is set/allocated.  It deliberately does **not**
+        # include the framing overhead (start flag/IUID/type/length/CRC).
+        self.buffer_size_ = 0
         self.payload_buffer_ = None
         self.crc_ = 0
         self.buffer_ = None
@@ -127,9 +145,18 @@ class FixedPacket:
                 else:
                     self.set_buffer(buffer_)
             elif buffer_size is None:
-                buffer_size = 6 + max(len(data), 1) + 4  # Add 2 bytes for CRC and 2 bytes for length
+                # Auto-size the payload buffer to exactly hold `data`.  N.B.
+                # at least one byte is allocated so that an empty payload
+                # still results in an *allocated* (but empty) buffer.
+                buffer_size = max(len(data), 1)
+        elif buffer_ is None and buffer_size is None and type_ in HEADER_ONLY_TYPES:
+            # A header-only packet can never carry a payload, so allocate an
+            # empty payload buffer.  This keeps `data()` valid (returning
+            # ``b''``) for e.g. `cPacket(type_=PACKET_TYPES.ACK)`, which
+            # callers log/measure alongside packets that do have payloads.
+            buffer_size = 0
 
-        if buffer_size is not None and buffer_size > 0:
+        if buffer_size is not None and buffer_size >= 0:
             self.alloc_buffer(buffer_size)
 
         if data is not None:
@@ -156,6 +183,20 @@ class FixedPacket:
         self.compute_crc()
 
     def data(self) -> bytes:
+        """
+        Returns
+        -------
+        bytes
+            Payload contents (empty if a buffer has been allocated but no
+            payload has been set, e.g. a header-only or zero-length packet).
+
+        Raises
+        ------
+        RuntimeError
+            If no payload buffer has ever been set/allocated.
+        """
+        if self.payload_buffer_ is None:
+            raise RuntimeError('No buffer has been set/allocated.')
         if self.payload_length_ > 0:
             return bytes(self.payload_buffer_[:self.payload_length_])
         return b''
@@ -171,25 +212,38 @@ class FixedPacket:
         self.crc_ = compute_crc16(self.data())
 
     def tobytes(self) -> bytes:
-        try:
-            # Format: START + IUID + TYPE + [LENGTH + PAYLOAD + CRC if payload exists]
-            header = struct.pack('>H', self.iuid_)  # IUID (2 bytes)
-            header += struct.pack('B', self._type)  # Type (1 byte)
+        """
+        Serialize the packet to its NadaMQ wire representation.
 
-            if self.buffer_size_ == 6:
-                packet = FLAGS.START + header
-                return packet
-            else:
-                header += struct.pack('>H', self.payload_length_)  # Length (2 bytes)
-                packet = FLAGS.START + header
-                if self.payload_length_ > 0:
-                    packet += self.data()
-                packet += struct.pack('>H', self.crc_)
-                return packet
+        The format is selected by the *packet type* (**not** by the size of
+        any allocated buffer)::
 
-        except Exception as e:
-            print(f"Error converting packet to bytes: {e}")
-            return b''
+            header-only types  START(3) + IUID(2) + TYPE(1)
+            all other types    START(3) + IUID(2) + TYPE(1) + LENGTH(2)
+                               + PAYLOAD(n) + CRC(2)
+
+        Notes
+        -----
+        Exceptions are deliberately **not** swallowed: silently emitting a
+        zero-byte packet corrupts the stream far more subtly than raising.
+        """
+        # START + IUID(2, big-endian) + TYPE(1)
+        header = struct.pack('>HB', self.iuid_, self._type)
+
+        if self._type in HEADER_ONLY_TYPES:
+            if self.payload_length_ > 0:
+                _L().warning(
+                    f'Payload of {self.payload_length_} byte(s) dropped: '
+                    f'{PACKET_NAME_BY_TYPE.get(self._type, self._type)} '
+                    'packets are header-only.')
+            return FLAGS.START + header
+
+        header += struct.pack('>H', self.payload_length_)  # Length (2 bytes)
+        packet = FLAGS.START + header
+        if self.payload_length_ > 0:
+            packet += self.data()
+        packet += struct.pack('>H', self.crc_)
+        return packet
 
     def tostring(self) -> bytes:
         import warnings
@@ -217,7 +271,7 @@ class FixedPacket:
         """Deallocate buffer if it has been allocated."""
         self.payload_buffer_ = None
         self.buffer_ = None
-        self.buffer_size_ = 6
+        self.buffer_size_ = 0
         self.payload_length_ = 0
 
     def realloc_buffer(self, buffer_size: int) -> None:
@@ -242,7 +296,8 @@ class FixedPacket:
         if self.payload_buffer_ is not None and not overwrite:
             raise RuntimeError('Packet already has a payload buffer allocated. Must use `overwrite=True` to set buffer anyway.')
         self.payload_buffer_ = bytearray(data)
-        self.buffer_size_ = len(data) + 4  # Add 2 bytes for CRC and 2 bytes for length
+        # `buffer_size_` tracks the payload *capacity* only.
+        self.buffer_size_ = len(data)
         self.payload_length_ = 0
 
     def __str__(self) -> str:
@@ -283,67 +338,137 @@ class cPacketParser:
     Attributes:
         payload_bytes_received_: Number of payload bytes received
         payload_bytes_expected_: Expected payload length
-        message_completed_: True if a complete message has been parsed
-        parse_error_: True if an error occurred during parsing
-        state: Current state of the parser ('START', 'HEADER', etc.)
+        message_completed_: True if the most recent :meth:`parse` call
+            completed a message
+        parse_error_: True if the most recent :meth:`parse` call encountered a
+            parse error
+        state: Current state of the parser (:class:`PacketState`)
+        buffer: Bytes consumed so far for the field currently being parsed
+        packet: Packet currently being assembled
+
+    Version log
+    -----------
+    .. versionchanged:: 0.54
+        Header-only packets (see :data:`HEADER_ONLY_TYPES`) are completed as
+        soon as the type field has been read, so they parse correctly when fed
+        one byte at a time (and no longer consume the start flag of the packet
+        that follows them).
+
+    .. versionchanged:: 0.54
+        :attr:`message_completed` and :attr:`error` describe the outcome of
+        the *most recent* :meth:`parse` call and remain readable until the
+        next call to :meth:`parse` (previously both flags were consumed before
+        :meth:`parse` returned, making them useless to callers).
     """
-    def __init__(self, buffer_size: int = 8 << 10):
+    def __init__(self, buffer_size: int = (1 << 16) - 1):
+        #: Maximum accepted payload length.  A packet declaring a longer
+        #: payload is treated as a parse error *before* anything is allocated.
+        self.max_payload_size = max(0, min(int(buffer_size), (1 << 16) - 1))
         self.payload_bytes_received_ = 0
         self.payload_bytes_expected_ = 0
         self.message_completed_ = False
         self.parse_error_ = False
         self.crc_ = 0
-        self.packet = FixedPacket(buffer_size=buffer_size)
+        self.packet = FixedPacket()
         self.state = PacketState.START
         self.buffer = bytearray()
         self.reset()
 
-    def reset(self) -> None:
-        """Reset parser state and packet."""
+    def _reset_state(self) -> None:
+        """
+        Reset the state machine (but **not** the public outcome flags).
+        """
         self.state = PacketState.START
         self.buffer = bytearray()
-        self.message_completed_ = False
-        self.parse_error_ = False
         self.payload_bytes_received_ = 0
         self.payload_bytes_expected_ = 0
         self.crc_ = 0
         if hasattr(self.packet, 'clear_buffer'):
             self.packet.clear_buffer()
+        # Clear the header fields so a stale type/IUID from a previous
+        # (aborted) packet can never be mistaken for a partially parsed one.
+        self.packet.type_ = PACKET_TYPE.NONE
+        self.packet.iuid_ = 0
+
+    def reset(self) -> None:
+        """
+        Reset parser state and packet, clearing the :attr:`message_completed`
+        and :attr:`error` flags.
+
+        Safe to call at any time, including immediately after :meth:`parse`
+        has returned a completed packet (the state machine has already been
+        reset internally in that case, so this is a no-op apart from clearing
+        the flags).
+        """
+        self._reset_state()
+        self.message_completed_ = False
+        self.parse_error_ = False
 
     def parse(self, data: Union[bytes, bytearray, np.ndarray]) -> Union[FixedPacket, bool]:
-        """Parse packet data and return packet if complete."""
-        for i, byte in enumerate(data):
-            self.parse_byte(byte)
-            if self.message_completed_ or (i == len(data)-1 == 5): # handle the case where the message is short START(3) + IUID(2) + TYPE(1)
-                self.packet.buffer_size_ = i+1
+        """
+        Parse packet data and return the packet if one was completed.
+
+        Returns
+        -------
+        FixedPacket or bool
+            Completed packet, or ``False`` if no packet was completed by this
+            call.  N.B. ``False`` (**not** ``None``) is returned for the
+            incomplete case, since callers test ``result is not False``.
+        """
+        # The flags describe the outcome of *this* call only.
+        self.message_completed_ = False
+        self.parse_error_ = False
+        # Whether *any* byte in this call triggered a parse error.  Tracked
+        # separately from `self.parse_error_`, which must be cleared after each
+        # error so that the bytes *following* the error are parsed normally
+        # (rather than each one re-triggering the error branch below, which
+        # made it impossible to recover a valid packet from the remainder of a
+        # chunk that started with corrupt data).
+        error_occurred = False
+
+        for byte in data:
+            self.parse_byte(int(byte))
+
+            if self.message_completed_:
                 packet = self.packet
-                # Create a new packet for next message
+                # Create a new packet for the next message.
                 self.packet = FixedPacket()
-                self.reset()
+                self._reset_state()
+                # Keep the outcome observable to the caller until its next
+                # call to `parse()`.
+                self.message_completed_ = True
+                self.parse_error_ = False
                 return packet
             elif self.parse_error_:
-                print(f'Error parsing packet - resetting and continuing')
-                # Reset state but continue processing
-                self.reset()
+                _L().debug('Error parsing packet - resetting and continuing')
+                # Reset state but continue processing remaining data.
+                self._reset_state()
                 self.parse_error_ = False
+                error_occurred = True
+        # No packet completed during this call; report whether an error was
+        # encountered along the way.
+        self.parse_error_ = error_occurred
         return False
 
     def parse_byte(self, byte: int) -> None:
         """Parse a single byte."""
         try:
             self.buffer.append(byte)
-            
+
             if self.state == PacketState.START:
-                if len(self.buffer) >= 3:
-                    if bytes(self.buffer[-3:]) == FLAGS.START:
-                        self.state = PacketState.HEADER
-                        self.buffer = bytearray()
+                # Only the trailing 3 bytes are ever inspected for the start
+                # flag, so discard anything older to keep the buffer bounded
+                # on a noisy line.
+                if len(self.buffer) > len(FLAGS.START):
+                    del self.buffer[:-len(FLAGS.START)]
+                if bytes(self.buffer) == FLAGS.START:
+                    self.state = PacketState.HEADER
+                    self.buffer = bytearray()
 
             elif self.state == PacketState.HEADER:  # IUID(2) + TYPE(1)
                 if len(self.buffer) >= 3:
-                    self.packet.iuid_ = struct.unpack('>H', self.buffer[0:2])[0]
+                    self.packet.iuid_ = struct.unpack('>H', bytes(self.buffer[0:2]))[0]
                     self.packet.type_ = self.buffer[2]
-                    self.state = PacketState.LENGTH
                     self.buffer = bytearray()
 
                     # Validate header
@@ -352,23 +477,41 @@ class cPacketParser:
                         self.parse_error_ = True
                         return
 
+                    if self.packet.type_ in HEADER_ONLY_TYPES:
+                        # Header-only packet: there is no LENGTH, PAYLOAD or
+                        # CRC field on the wire, so the packet is complete.
+                        # N.B. an *empty* payload buffer is allocated so that
+                        # `packet.data()` returns `b''` rather than raising.
+                        self.payload_bytes_expected_ = 0
+                        self.packet.alloc_buffer(0)
+                        self.packet.payload_length_ = 0
+                        self.packet.compute_crc()
+                        self.message_completed_ = True
+                        return
+
+                    self.state = PacketState.LENGTH
+
             elif self.state == PacketState.LENGTH:
                 if len(self.buffer) >= 2:  # LENGTH(2)
-                    self.payload_bytes_expected_ = struct.unpack('>H', self.buffer[0:2])[0]
-
-                    if self.payload_bytes_expected_ > 0:
-                        self.packet.alloc_buffer(self.payload_bytes_expected_)
-                        self.state = PacketState.PAYLOAD
-                    else:
-                        self.packet.payload_length_ = 0
-                        self.state = PacketState.CRC
+                    payload_length = struct.unpack('>H', bytes(self.buffer[0:2]))[0]
                     self.buffer = bytearray()
 
-                    # Validate payload length
-                    if self.payload_bytes_expected_ > self.packet.max_buffer_size:
-                        print(f"Payload length too large: {self.payload_bytes_expected_} > {self.packet.max_buffer_size}")
+                    # Validate payload length *before* allocating anything.
+                    if payload_length > self.max_payload_size:
+                        _L().warning(f"Payload length too large: {payload_length} > {self.max_payload_size}")
                         self.parse_error_ = True
                         return
+
+                    self.payload_bytes_expected_ = payload_length
+                    # Always allocate (even for a zero-length payload) so that
+                    # `packet.data()` is valid for every parsed packet.
+                    self.packet.alloc_buffer(payload_length)
+                    self.packet.payload_length_ = 0
+                    if payload_length > 0:
+                        self.state = PacketState.PAYLOAD
+                    else:
+                        self.packet.compute_crc()
+                        self.state = PacketState.CRC
 
             elif self.state == PacketState.PAYLOAD:
                 if len(self.buffer) >= self.payload_bytes_expected_:
@@ -378,7 +521,7 @@ class cPacketParser:
                         self.state = PacketState.CRC
                         self.buffer = bytearray()
                     except ValueError as e:
-                        print(f"Error setting payload: {e}")
+                        _L().warning(f"Error setting payload: {e}")
                         self.parse_error_ = True
                         return
 
@@ -391,10 +534,11 @@ class cPacketParser:
                             self.message_completed_ = True
                         else:
                             # Mark as error but don't reset immediately
+                            _L().debug(f"CRC mismatch: {received_crc:#06x} != {self.packet.crc_:#06x}")
                             self.parse_error_ = True
                         self.buffer = bytearray()
                     except struct.error as e:
-                        print(f"Error parsing CRC: {e}")
+                        _L().warning(f"Error parsing CRC: {e}")
                         self.parse_error_ = True
                         return
 
@@ -424,16 +568,23 @@ def parse_from_string(packet_str: Union[str, bytes]) -> Optional[FixedPacket]:
         
     Returns:
         FixedPacket if parsing successful, None otherwise
-        
+
     Raises:
         TypeError: If input is neither string nor bytes
+
+    Version log
+    -----------
+    .. versionchanged:: 0.54
+        Return ``None`` (rather than ``False``) when no complete packet is
+        found, matching the documented/annotated return type.
     """
     if not isinstance(packet_str, (str, bytes)):
         raise TypeError("Input must be string or bytes")
     if isinstance(packet_str, str):
         packet_str = packet_str.encode('utf-8')
     parser = cPacketParser()
-    return parser.parse(np.array([v for v in packet_str], dtype='uint8'))
+    result = parser.parse(np.frombuffer(packet_str, dtype='uint8'))
+    return None if result is False else result
 
 
 def byte_pair(value: int) -> tuple:
@@ -855,5 +1006,7 @@ class cPacket(FixedPacket):
     def reset_buffer(self, buffer_size: int, buffer_: Union[bytes, bytearray]):
         """Reset buffer with new size and data."""
         self.clear_buffer()
-        self.buffer_size_ = buffer_size
+        # N.B. `set_buffer()` assigns `buffer_size_` itself, so the explicit
+        # size must be applied *afterwards* (otherwise it is overwritten).
         self.set_buffer(buffer_, overwrite=True)
+        self.buffer_size_ = buffer_size

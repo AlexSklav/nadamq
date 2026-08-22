@@ -24,8 +24,14 @@ def test_parse_nack():
     a = cPacket(iuid=4321, type_=PACKET_TYPES.NACK)
     b = parse_from_string(a.tobytes())
 
-    # TODO Should parse fail with `NACK` type?  It currently does.
-    assert not b
+    # N.B. this test previously asserted that parsing a ``NACK`` packet
+    # *fails*.  That was a bug, not a contract: ``NACK`` (like ``ACK`` and
+    # ``ID_REQUEST``) is a header-only packet, which the parser now completes
+    # as soon as the type field has been read.  See ``HEADER_ONLY_TYPES``.
+    assert b is not None
+    assert a.type_ == b.type_
+    assert a.iuid == b.iuid
+    assert b.data() == b''
 
 
 def test_parse_id_response():
